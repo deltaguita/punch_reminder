@@ -2,9 +2,8 @@
 """104 打卡提醒 Bot"""
 
 import os
-import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime
 from dotenv import load_dotenv
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -57,6 +56,9 @@ class PunchChecker:
                 self.session.cookies.set(key, value)
     
     def get_today_punch(self):
+        # 重新載入 Cookie（支援熱更新）
+        self._setup_session()
+        
         now = datetime.now(TZ)
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         if now.month == 12:
@@ -162,8 +164,12 @@ async def check_clock_out(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """處理按鈕回調"""
+    """處理按鈕回調（僅限本人）"""
     query = update.callback_query
+    if query.from_user.id != CHAT_ID:
+        await query.answer("無權限")
+        return
+    
     await query.answer()
     
     reset_daily_status()
@@ -176,7 +182,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看打卡狀態"""
+    """查看打卡狀態（僅限本人）"""
+    if update.effective_user.id != CHAT_ID:
+        return
+    
     result = checker.get_today_punch()
     if "error" in result:
         await update.message.reply_text(f"❌ 查詢失敗: {result['error']}")
@@ -190,6 +199,25 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"下班: {'✅ ' + result['clock_out'] if result.get('clock_out') else '❌ 未打卡'}"
     
     await update.message.reply_text(text)
+
+
+async def check_cookie_valid(context: ContextTypes.DEFAULT_TYPE):
+    """每天晚上檢查 Cookie 是否有效"""
+    result = checker.get_today_punch()
+    if "error" in result:
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"⚠️ 104 Cookie 已過期！\n\n"
+                 f"錯誤：{result['error']}\n\n"
+                 f"請執行以下步驟更新：\n"
+                 f"1. 登入 https://pro.104.com.tw/psc2\n"
+                 f"2. F12 → Network → 複製 Cookie\n"
+                 f"3. 在電腦執行：\n"
+                 f"`cd ~/punch_reminder && ./update_cookie.sh \"cookie\"`"
+        )
+        logger.warning(f"Cookie 檢查失敗: {result['error']}")
+    else:
+        logger.info("Cookie 檢查通過")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,6 +246,9 @@ def main():
     # 下班提醒：19:20-22:00 每分鐘  
     job_queue.run_repeating(check_clock_out, interval=60, first=10,
                             job_kwargs={"id": "clock_out"})
+    # Cookie 檢查：每天 21:00
+    job_queue.run_daily(check_cookie_valid, time=dtime(hour=21, minute=0, tzinfo=TZ),
+                        job_kwargs={"id": "cookie_check"})
     
     logger.info("Bot 啟動中...")
     app.run_polling(drop_pending_updates=True)
